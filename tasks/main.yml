@@ -1,0 +1,105 @@
+---
+- name: Gather hcloud Volume infos
+  hetzner.hcloud.volume_info:
+    api_token: "{{ vault_hcloud_token }}"
+    label_selector: "server={{ ansible_facts['fqdn'] }}"
+  register: output
+
+- name: Get UUID
+  ansible.builtin.command: lsblk {{ output.hcloud_volume_info[0].linux_device }} -no UUID
+  register: uuid
+
+- name: Create mount point
+  ansible.builtin.file:
+    path: /opt/glusterfs/webdatavolume
+    state: directory
+    mode: '0755'
+
+- name: Mount new volumes and create fstab entries
+  ansible.posix.mount:
+    path: "/opt/glusterfs/webdatavolume"
+    src: UUID={{ uuid.stdout_lines[0] }}
+    state: mounted
+    fstype: ext4
+    opts: defaults,nofail
+
+- name: Create brick folder
+  ansible.builtin.file:
+    path: /opt/glusterfs/webdatavolume/brick0
+    state: directory
+    mode: '0755'
+
+- name: Delete lost+found
+  ansible.builtin.file:
+    path: "/opt/glusterfs/webdatavolume/lost+found"
+    state: absent
+
+- name: Add glusterfs apt-key
+  ansible.builtin.get_url:
+    url: "https://download.gluster.org/pub/gluster/glusterfs/11/rsa.pub"
+    dest: /etc/apt/trusted.gpg.d/glusterfs.asc
+    mode: '0644'
+    force: true
+
+- name: Add glusterfs apt repository
+  apt_repository: 
+    repo: "deb [signed-by=/etc/apt/trusted.gpg.d/glusterfs.asc] https://download.gluster.org/pub/gluster/glusterfs/LATEST/Debian/{{ ansible_facts['lsb']['major_release'] }}/amd64/apt {{ ansible_facts['lsb']['codename'] }} main"
+    state: present 
+    filename: nginx 
+    update_cache: yes
+
+- name: Install glusterfs-server
+  apt: 
+    name: glusterfs-server
+    state: present
+    update_cache: yes
+
+- name: Install glusterfs-client
+  apt: 
+    name: glusterfs-client
+    state: present
+    update_cache: yes
+
+- name: Enable and start glusterd
+  ansible.builtin.service:
+    name: glusterd
+    state: started
+    enabled: yes
+
+- name: Create gluster volume
+  gluster.gluster.gluster_volume:
+    state: present
+    name: webdataVolume
+    bricks: /opt/glusterfs/webdatavolume/brick0
+    rebalance: yes
+    cluster:
+      - webstorage1-fsn1.infra.sirjavik.de
+      - webstorage2-nbg1.infra.sirjavik.de
+      - webstorage3-fsn1.infra.sirjavik.de
+  run_once: true
+
+- name: Tune webdataVolume volume
+  gluster.gluster.gluster_volume:
+    state: present
+    name: webdataVolume
+    options:
+      performance.cache-size: 256MB
+
+- name: Start webdataVolume volume
+  gluster.gluster.gluster_volume:
+    state: started
+    name: webdataVolume
+
+- name: Create /data/web
+  ansible.builtin.file:
+    path: /data/web
+    state: directory
+    mode: '0755'
+
+- name: Mount /data/web from glusterfs
+  ansible.posix.mount:
+    path: "/data/web"
+    src: "localhost:/webdataVolume"
+    state: mounted
+    fstype: glusterfs
+    opts: defaults,nofail
